@@ -46,8 +46,8 @@ app.get('/metrics', (req, res) => {
 ```
 
 ### Grafana
-version: '3'
 ```yml
+version: '3'
 services:
   grafana:
     image: grafana/grafana
