@@ -182,3 +182,177 @@ public class UserService {
     }
 }
 ```
+
+## JWT
+### Dependencies
+```gradle
+implementation 'org.springframework.boot:spring-boot-starter-security'
+implementation 'io.jsonwebtoken:jjwt:0.9.1'
+implementation "javax.xml.bind:jaxb-api:2.4.0-b180830.0359"
+```
+### Security Config
+```java
+@Configuration
+@EnableWebSecurity
+@RequiredArgsConstructor
+public class SecurityConfig {
+
+    private final MyUserDetailsService userDetailsService;
+    private final PasswordEncoder passwordEncoder;
+    private final JwtAuthFilter jwtAuthFilter;
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http.csrf(AbstractHttpConfigurer::disable)
+                .authorizeHttpRequests(request -> request.requestMatchers(
+                        "/users/register/**",
+                                "/users/login/**",
+                                "/swagger-ui/**", "/v3/api-docs/**").permitAll()
+                        .anyRequest().authenticated())
+                .sessionManagement(manager -> manager.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .authenticationProvider(authenticationProvider());
+
+        return http.build();
+    }
+
+    private AuthenticationProvider authenticationProvider() {
+        DaoAuthenticationProvider authenticationProvider = new DaoAuthenticationProvider();
+        authenticationProvider.setUserDetailsService(userDetailsService);
+        authenticationProvider.setPasswordEncoder(passwordEncoder);
+        return authenticationProvider;
+    }
+
+    @Bean
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration authenticationConfiguration) throws Exception {
+        return authenticationConfiguration.getAuthenticationManager();
+    }
+}
+
+```
+### UserDetailsService
+```java
+@Service
+@AllArgsConstructor
+@Slf4j
+public class MyUserDetailsService implements UserDetailsService {
+
+    private UserService userService;
+
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+        var user = userService.findByUsername(username).map(MyUserDetails::new).orElseThrow(() -> new UsernameNotFoundException("Username not found"));
+
+        return user;
+    }
+}
+```
+### Request Filter
+```java
+@Component
+@RequiredArgsConstructor
+public class JwtAuthFilter extends OncePerRequestFilter {
+    private static final String BEARER_HEADER = "Bearer";
+
+    private final JwtTokenProvider jwtTokenProvider;
+    private final UserService userService;
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain) throws ServletException, IOException {
+        String authHeader = request.getHeader(HttpHeaders.AUTHORIZATION);
+
+        if (authHeader == null || !authHeader.startsWith(BEARER_HEADER)) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+
+        String jwtToken = authHeader.substring(BEARER_HEADER.length() + 1);
+
+        if (jwtTokenProvider.validateToken(jwtToken)) {
+            Claims claims = jwtTokenProvider.getClaimsFromJWT(jwtToken);
+            String username = claims.getSubject();
+
+            var authenToken = userService.findByUsername(username)
+                    .map(MyUserDetails::new)
+                    .map(myUserDetails -> {
+                        return new UsernamePasswordAuthenticationToken(myUserDetails, null, myUserDetails.getAuthorities());
+                    })
+                    .orElse(null);
+
+            SecurityContextHolder.getContext().setAuthentication(authenToken);
+        } else {
+            SecurityContextHolder.clearContext();
+        }
+
+        filterChain.doFilter(request, response);
+    }
+}
+```
+### JWT config
+```java
+@Data
+@Component
+@NoArgsConstructor
+public class JwtConfig {
+    @Value("${security.jwt.expiration:#{24*60*60}}")
+    private int expiration;
+
+    @Value("${security.jwt.secret:JwtSecretKey}")
+    private String secret;
+}
+```
+### JWT Service
+```java
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class JwtTokenProvider {
+    private final JwtConfig jwtConfig;
+
+    public String generateToken(Authentication authentication) {
+        long now = System.currentTimeMillis();
+        long exp = now + jwtConfig.getExpiration() * 1_000;
+        return Jwts.builder().setSubject(authentication.getName())
+                .claim("authorities", authentication.getAuthorities().stream()
+                        .map(GrantedAuthority::getAuthority).collect(Collectors.toList()))
+                .setIssuedAt(new Date(now))
+                .setExpiration(new Date(exp))
+                .signWith(SignatureAlgorithm.HS512, jwtConfig.getSecret().getBytes())
+                .compact();
+    }
+
+    public Claims getClaimsFromJWT(String token) {
+        return Jwts.parser()
+                .setSigningKey(jwtConfig.getSecret().getBytes())
+                .parseClaimsJws(token)
+                .getBody();
+    }
+
+    public boolean validateToken(String authToken) {
+        try {
+            Jwts.parser()
+                    .setSigningKey(jwtConfig.getSecret().getBytes())
+                    .parseClaimsJws(authToken);
+
+            return true;
+        } catch (Exception ex) {
+            log.error("Validate token err {}", ex);
+        }
+
+        return false;
+    }
+}
+```
+### Login
+```java
+@PostMapping("/login")
+public ResponseEntity<?> login(@Valid @RequestBody LoginRequest loginRequest) {
+    log.info("login {}", loginRequest);
+
+    Authentication authentication = authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(loginRequest.getUsername(), loginRequest.getPassword(), new ArrayList<>()));
+    String jwt = tokenProvider.generateToken(authentication);
+    var res = new JwtAuthenticationResponse();
+    res.setAccessToken(jwt);
+    return ResponseEntity.ok(res);
+}
+```
