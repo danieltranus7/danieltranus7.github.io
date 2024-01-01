@@ -40,7 +40,10 @@ implementation group: 'org.springframework.boot', name: 'spring-boot-starter-web
 
 Update application config to prevent register itselft to the registry
 ```yml
-eureka.client.service-url.default-zone: http://localhost:8761/eureka
+eureka:
+    client:
+        service-url:
+            default-zone: http://localhost:8761/eureka
 ```
 
 ## Swagger
@@ -125,6 +128,14 @@ services:
       - 27017:27017
 ```
 
+```yml
+spring:
+    mongodb:
+        host: localhost
+        port: 27017
+        database: post
+```
+
 Add dependency:
 ```gradle
 implementation 'org.springframework.boot:spring-boot-starter-data-mongodb'
@@ -191,6 +202,14 @@ implementation 'io.jsonwebtoken:jjwt:0.9.1'
 implementation "javax.xml.bind:jaxb-api:2.4.0-b180830.0359"
 ```
 ### Security Config
+```yml
+security:
+  jwt:
+    uri: /auth/**
+    prefix: Bearer
+    expiration: 86400
+    secret: JwtSecretKey
+```
 ```java
 @Configuration
 @EnableWebSecurity
@@ -354,5 +373,271 @@ public ResponseEntity<?> login(@Valid @RequestBody LoginRequest loginRequest) {
     var res = new JwtAuthenticationResponse();
     res.setAccessToken(jwt);
     return ResponseEntity.ok(res);
+}
+```
+
+## Spring Cloud Stream
+### Dependencies
+```gradle
+plugins {
+	id "com.github.davidmc24.gradle.plugin.avro" version "1.2.0"
+}
+
+repositories {
+	mavenCentral()
+	maven {
+		url "https://packages.confluent.io/maven"
+	}
+}
+
+implementation 'org.apache.avro:avro:1.11.3'
+implementation 'org.springframework.cloud:spring-cloud-stream:4.0.4'
+implementation 'org.springframework.cloud:spring-cloud-stream-binder-kafka:4.0.4'
+implementation 'org.springframework.cloud:spring-cloud-starter-stream-kafka:4.0.4'
+implementation 'org.springframework.cloud:spring-cloud-stream-schema:2.2.1.RELEASE'
+implementation 'io.confluent:kafka-avro-serializer:5.3.0'
+```
+
+### Producer - Function-based Model
+```
+<functionName> + -out- + <index>
+```
+
+```yml
+spring:
+    cloud:
+        stream:
+            default:
+                producer:
+                    useNativeEncoding: true
+            kafka:
+                binder:
+                    broker: kafka-local:9092
+                    replicationFactor: 1
+                    producer-properties:
+                        key.serializer: io.confluent.kafka.serializers.KafkaAvroSerializer
+                        value.serializer: io.confluent.kafka.serializers.KafkaAvroSerializer
+                        schema.registry.url: http://localhost:8085
+            bindings:
+                userTopicBinding-out-0:
+                    destination: store.user
+                    content-type: application/*+avro
+                    producer:
+                        partitionCount: 3
+```
+
+```java
+public class KafkaConfig {
+    public static final String USER_TOPIC_BINDING_OUT = "userTopicBinding-out-0";
+}
+
+@RequiredArgsConstructor
+@Service
+public class UserEventProducer {
+    private final StreamBridge streamBridge;
+
+    public void sendUserEvent(UserEvent userEvent) {
+        streamBridge.send(KafkaConfig.USER_TOPIC_BINDING_OUT, userEvent);
+    }
+}
+```
+
+### Consumer - Function-based Model
+```
+<functionName> + -in- + <index>
+Ex: userTopicBinding-in-0
+```
+
+```yml
+spring:
+    cloud:
+        function:
+            definition: userTopicBinding
+        stream:
+            kafka:
+                binder:
+                    brokers: kafka-local:29092
+                    replicationFactor: 1
+                    consumer-properties:
+                        key.deserializer: io.confluent.kafka.serializers.KafkaAvroDeserializer
+                        value.deserializer: io.confluent.kafka.serializers.KafkaAvroDeserializer
+                        schema.registry.url: http://localhost:8085
+                        specific.avro.reader: true
+            bindings:
+                userTopicBinding-in-0:
+                    destination: store.user
+                    content-type: application/*+avro
+                    group: authen-group
+```
+
+```java
+@Component
+@Slf4j
+public class UserEventConsumer {
+    @Bean
+    public Consumer<Message<UserEvent>> userTopicBinding() {
+        return msg -> {
+            log.info("Received Kafka Msg {}", msg);
+        };
+    }
+}
+```
+
+## Spring Cloud Api Gateway
+```gradle
+implementation 'org.springframework.cloud:spring-cloud-starter-gateway'
+```
+
+```yml
+spring:
+  application:
+    name: api-gateway
+
+  cloud:
+    gateway:
+      routes:
+        - id: friend
+          uri: lb://FRIEND
+          predicates:
+            - Path=/friend/**
+```
+
+## Neo4j
+
+```yml
+version: '3'
+services:
+  neo4j:
+    image: neo4j:latest
+    environment:
+      NEO4J_AUTH: 'neo4j/EAXvd75u5S7eXtb'
+    ports:
+     - "7474:7474"
+     - "7687:7687"
+```
+```gradle
+implementation group: 'org.springframework.boot', name: 'spring-boot-starter-data-neo4j', version: '3.1.5'
+```
+
+```yml
+spring:
+    neo4j:
+        uri: bolt://localhost:7687
+        authentication:
+            username: neo4j
+            password: EAXvd75u5S7eXtb
+```
+
+```java
+@Configuration
+public class Neo4jConfig {
+    @Bean
+    Configuration cypherDslConfiguration() {
+        return Configuration.newConfig()
+          .withDialect(Dialect.NEO4J_5).build();
+    }
+}
+```
+
+```java
+@Node("User")
+public class User {
+    @Id private String id
+    private String username;
+    private String firstName;
+    private String lastName;
+    @Relationship(type= "IS_FOLLOWING", direction = Relationship.Direction.OUTGOING)
+    private Set<User> following;
+}
+```
+
+```java
+@Repository
+public interface UserRepository extends Neo4jRepository<User, String> {
+    Optional<User> findByUsername(String username);
+    @Query(value = "MATCH (user: User {username:{0}}) -[:IS_FOLLOWING]-> (following: User) RETURN following", countQuery = "MATCH (user: User {username:{0}}) -[:IS_FOLLOWING]-> (following: User) RETURN count(following)")
+    Page<User> findFollowing(String username, Pageable pageable);
+}
+```
+
+## Mapstruct
+```gradle
+ext {
+	mapstructVersion = '1.5.5.Final'
+}
+
+implementation "org.mapstruct:mapstruct:${mapstructVersion}"
+testAnnotationProcessor "org.mapstruct:mapstruct-processor:${mapstructVersion}"
+annotationProcessor "org.mapstruct:mapstruct-processor:${mapstructVersion}"
+```
+
+```java
+@Mapper(componentModel = "spring")
+public interface UserMapper {
+//    @Mapping(source = "username", target = "username")
+//    @Mapping(source = "password", target = "password")
+    User toUser(RegisterRequest registerRequest);
+
+    UserEvent toUserEvent(User user);
+}
+```
+
+## Cassandra
+```gradle
+implementation group: 'com.datastax.cassandra', name: 'cassandra-driver-core', version: '1.0.0'
+```
+
+```yml
+spring:
+    cassandra:
+        schema-action: CREATE_IF_NOT_EXISTS
+        local-datacenter: datacenter1
+        contact-points: localhost
+        port: 9042
+        keyspace-name: user
+```
+
+```java
+@Repository
+public interface UserFeedRepository extends CassandraRepository<UserFeed, String> {
+    List<UserFeed> findByUsername(String username);
+}
+```
+
+```java
+@Data
+@Table
+@Builder
+public class UserFeed {
+    @PrimaryKeyColumn(name = "username", ordinal = 0, type = PrimaryKeyType.PARTITIONED)
+    private String username;
+
+    @PrimaryKeyColumn(name = "created_at", ordinal = 1, ordering = Ordering.DESCENDING)
+    private Instant createdAt;
+
+    @PrimaryKeyColumn(name = "post_id", ordinal = 2)
+    private String postId;
+}
+
+```
+
+## FeignClient
+```yml
+implementation 'org.springframework.cloud:spring-cloud-starter-openfeign'
+```
+
+```java
+@SpringBootApplication
+@EnableFeignClients
+@Slf4j
+public class NewsfeedApplication
+```
+
+```java
+@FeignClient(name = "Post", url = "http://localhost:8762/post")
+public interface PostClient {
+    @RequestMapping(method = RequestMethod.POST, value = "/posts/in")
+    ResponseEntity<List<PostDto>> findPostsIn(
+            @RequestBody List<String> ids);
 }
 ```
